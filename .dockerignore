@@ -1,4 +1,5 @@
 bin/
+output/
 config.yaml
 .git/
 *.log
