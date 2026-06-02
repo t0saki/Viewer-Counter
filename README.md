@@ -8,7 +8,7 @@ page load; public endpoints expose totals and recent counts; an authenticated
 API exposes detailed analytics; a built-in dashboard visualizes it all.
 
 Built for the **tens-to-hundreds QPS** range with deliberately low operational
-complexity: Go + MySQL, two dependencies, a single static binary.
+complexity: Go + PostgreSQL, two dependencies, a single static binary.
 
 ## How it works
 
@@ -16,8 +16,8 @@ complexity: Go + MySQL, two dependencies, a single static binary.
   page load ──► POST /api/v1/hit ──► [bot filter] ──► [dedup TTL] ──► in-memory counter
                                                                           │
    GET /api/v1/count  ◄── real-time total (memory)                       │ write-behind
-   GET /api/v1/recent ◄── hourly buckets (MySQL)                         ▼ (every ~1s / batch)
-   GET /api/v1/admin/* ◄── detailed queries (MySQL) ◄────────────── MySQL: counters
+   GET /api/v1/recent ◄── hourly buckets (Postgres)                         ▼ (every ~1s / batch)
+   GET /api/v1/admin/* ◄── detailed queries (Postgres) ◄────────────── Postgres: counters
                                                                           + hourly buckets
                                                                           + raw events (optional)
 ```
@@ -25,7 +25,7 @@ complexity: Go + MySQL, two dependencies, a single static binary.
 - **Totals are real-time** — served from an in-memory atomic counter (seeded from
   the DB at startup), so reads never touch the database.
 - **Writes are buffered** — increments accumulate in memory and a background
-  goroutine flushes deltas to MySQL on an interval (default 1s) or when the
+  goroutine flushes deltas to Postgres on an interval (default 1s) or when the
   buffer fills. This is what lets a single instance absorb bursts cheaply.
 - **Accuracy is eventually-consistent** for `recent`/timeseries (≤1s lag, hourly
   granularity). On a DB hiccup, counter/bucket deltas are retried; in-memory
@@ -38,7 +38,7 @@ complexity: Go + MySQL, two dependencies, a single static binary.
 docker compose up --build -d
 ```
 
-This starts MySQL 8 and the app on `http://localhost:8080`. Open the dashboard
+This starts PostgreSQL 16 and the app on `http://localhost:8080`. Open the dashboard
 at `http://localhost:8080/dashboard`.
 
 ## Quick start (local)
@@ -48,8 +48,8 @@ cp config.example.yaml config.yaml   # then edit db.dsn, privacy.salt, auth.admi
 make run                             # or: go run ./cmd/server -config config.yaml
 ```
 
-You need a reachable MySQL 8. The DSN **must** include `parseTime=true&loc=UTC`.
-Tables are created automatically on startup.
+You need a reachable PostgreSQL (14+). Tables and indexes are created
+automatically on startup.
 
 ## Tracking snippet
 
@@ -188,5 +188,5 @@ DB-backed behavior is exercised via `docker compose up`.
 
 This is a single-instance design (in-memory counters + per-instance dedup/rate
 limit). To run multiple replicas you'd move shared state to Redis (atomic INCR,
-dedup set, rate limiter) and keep MySQL for persistence — out of scope here given
+dedup set, rate limiter) and keep Postgres for persistence — out of scope here given
 the target load.

@@ -1,5 +1,5 @@
-// Package store wraps the MySQL persistence layer: schema migration, counter
-// loading, write-behind flushes, and analytical queries.
+// Package store wraps the PostgreSQL persistence layer: schema migration,
+// counter loading, write-behind flushes, and analytical queries.
 package store
 
 import (
@@ -7,10 +7,11 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"viewer-counter/internal/config"
 )
@@ -76,7 +77,7 @@ type Store struct {
 const insertChunk = 500
 
 func Open(cfg config.DBConfig) (*Store, error) {
-	db, err := sql.Open("mysql", cfg.DSN)
+	db, err := sql.Open("pgx", cfg.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -96,7 +97,7 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
-// Migrate creates tables if they do not exist.
+// Migrate creates tables/indexes if they do not exist.
 func (s *Store) Migrate(ctx context.Context) error {
 	for _, stmt := range strings.Split(schemaSQL, ";") {
 		stmt = strings.TrimSpace(stmt)
@@ -129,6 +130,29 @@ func (s *Store) LoadCounters(ctx context.Context) (map[Key]int64, error) {
 	return out, rows.Err()
 }
 
+// valuesClause builds a positional VALUES list like "($1,$2),($3,$4)" for the
+// given row/column counts.
+func valuesClause(rows, cols int) string {
+	var b strings.Builder
+	idx := 1
+	for r := 0; r < rows; r++ {
+		if r > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteByte('(')
+		for c := 0; c < cols; c++ {
+			if c > 0 {
+				b.WriteByte(',')
+			}
+			b.WriteByte('$')
+			b.WriteString(strconv.Itoa(idx))
+			idx++
+		}
+		b.WriteByte(')')
+	}
+	return b.String()
+}
+
 // FlushCounters applies accumulated total deltas via upsert.
 func (s *Store) FlushCounters(ctx context.Context, deltas map[Key]int64) error {
 	if len(deltas) == 0 {
@@ -144,18 +168,15 @@ func (s *Store) FlushCounters(ctx context.Context, deltas map[Key]int64) error {
 	}
 	for i := 0; i < len(batch); i += insertChunk {
 		part := batch[i:min(i+insertChunk, len(batch))]
-		var sb strings.Builder
-		sb.WriteString("INSERT INTO page_counters (site_key, page_key, total_count) VALUES ")
 		args := make([]any, 0, len(part)*3)
-		for j, item := range part {
-			if j > 0 {
-				sb.WriteByte(',')
-			}
-			sb.WriteString("(?,?,?)")
+		for _, item := range part {
 			args = append(args, item.k.Site, item.k.Page, item.v)
 		}
-		sb.WriteString(" ON DUPLICATE KEY UPDATE total_count = total_count + VALUES(total_count)")
-		if _, err := s.db.ExecContext(ctx, sb.String(), args...); err != nil {
+		q := "INSERT INTO page_counters (site_key, page_key, total_count) VALUES " +
+			valuesClause(len(part), 3) +
+			" ON CONFLICT (site_key, page_key) DO UPDATE SET " +
+			"total_count = page_counters.total_count + EXCLUDED.total_count, updated_at = now()"
+		if _, err := s.db.ExecContext(ctx, q, args...); err != nil {
 			return err
 		}
 	}
@@ -177,18 +198,15 @@ func (s *Store) FlushBuckets(ctx context.Context, deltas map[BucketKey]int64) er
 	}
 	for i := 0; i < len(batch); i += insertChunk {
 		part := batch[i:min(i+insertChunk, len(batch))]
-		var sb strings.Builder
-		sb.WriteString("INSERT INTO view_buckets (site_key, page_key, bucket_start, cnt) VALUES ")
 		args := make([]any, 0, len(part)*4)
-		for j, item := range part {
-			if j > 0 {
-				sb.WriteByte(',')
-			}
-			sb.WriteString("(?,?,?,?)")
+		for _, item := range part {
 			args = append(args, item.k.Site, item.k.Page, item.k.Hour, item.v)
 		}
-		sb.WriteString(" ON DUPLICATE KEY UPDATE cnt = cnt + VALUES(cnt)")
-		if _, err := s.db.ExecContext(ctx, sb.String(), args...); err != nil {
+		q := "INSERT INTO view_buckets (site_key, page_key, bucket_start, cnt) VALUES " +
+			valuesClause(len(part), 4) +
+			" ON CONFLICT (site_key, page_key, bucket_start) DO UPDATE SET " +
+			"cnt = view_buckets.cnt + EXCLUDED.cnt"
+		if _, err := s.db.ExecContext(ctx, q, args...); err != nil {
 			return err
 		}
 	}
@@ -202,17 +220,13 @@ func (s *Store) InsertEvents(ctx context.Context, events []Event) error {
 	}
 	for i := 0; i < len(events); i += insertChunk {
 		part := events[i:min(i+insertChunk, len(events))]
-		var sb strings.Builder
-		sb.WriteString("INSERT INTO view_events (site_key, page_key, ts, ip_hash, ua, referer) VALUES ")
 		args := make([]any, 0, len(part)*6)
-		for j, ev := range part {
-			if j > 0 {
-				sb.WriteByte(',')
-			}
-			sb.WriteString("(?,?,?,?,?,?)")
+		for _, ev := range part {
 			args = append(args, ev.Site, ev.Page, ev.TS, nullStr(ev.IPHash), nullStr(ev.UA), nullStr(ev.Referer))
 		}
-		if _, err := s.db.ExecContext(ctx, sb.String(), args...); err != nil {
+		q := "INSERT INTO view_events (site_key, page_key, ts, ip_hash, ua, referer) VALUES " +
+			valuesClause(len(part), 6)
+		if _, err := s.db.ExecContext(ctx, q, args...); err != nil {
 			return err
 		}
 	}
@@ -221,27 +235,32 @@ func (s *Store) InsertEvents(ctx context.Context, events []Event) error {
 
 // Recent returns the view count since the given time using hourly buckets.
 func (s *Store) Recent(ctx context.Context, site, page string, since time.Time) (int64, error) {
-	var c sql.NullInt64
+	var c int64
 	err := s.db.QueryRowContext(ctx,
-		"SELECT SUM(cnt) FROM view_buckets WHERE site_key=? AND page_key=? AND bucket_start >= ?",
+		"SELECT COALESCE(SUM(cnt),0)::bigint FROM view_buckets "+
+			"WHERE site_key=$1 AND page_key=$2 AND bucket_start >= $3",
 		site, page, since).Scan(&c)
 	if err != nil {
 		return 0, err
 	}
-	return c.Int64, nil
+	return c, nil
 }
 
 // Timeseries returns bucketed counts between [from, to) at hour or day
 // granularity.
 func (s *Store) Timeseries(ctx context.Context, site, page string, from, to time.Time, interval string) ([]Point, error) {
-	fmtExpr := "DATE_FORMAT(bucket_start, '%Y-%m-%d %H:00:00')"
+	// Hourly buckets are already stored per hour, so the hour case needs no
+	// aggregation. The day case rolls hours up in UTC.
+	var query string
 	if interval == "day" {
-		fmtExpr = "DATE_FORMAT(bucket_start, '%Y-%m-%d 00:00:00')"
+		query = "SELECT date_trunc('day', bucket_start AT TIME ZONE 'UTC') AS b, SUM(cnt)::bigint " +
+			"FROM view_buckets WHERE site_key=$1 AND page_key=$2 AND bucket_start >= $3 AND bucket_start < $4 " +
+			"GROUP BY b ORDER BY b"
+	} else {
+		query = "SELECT bucket_start, cnt FROM view_buckets " +
+			"WHERE site_key=$1 AND page_key=$2 AND bucket_start >= $3 AND bucket_start < $4 " +
+			"ORDER BY bucket_start"
 	}
-	query := fmt.Sprintf(
-		"SELECT %s AS b, SUM(cnt) FROM view_buckets "+
-			"WHERE site_key=? AND page_key=? AND bucket_start >= ? AND bucket_start < ? "+
-			"GROUP BY b ORDER BY b", fmtExpr)
 	rows, err := s.db.QueryContext(ctx, query, site, page, from, to)
 	if err != nil {
 		return nil, err
@@ -249,16 +268,11 @@ func (s *Store) Timeseries(ctx context.Context, site, page string, from, to time
 	defer rows.Close()
 	var points []Point
 	for rows.Next() {
-		var b string
-		var c int64
-		if err := rows.Scan(&b, &c); err != nil {
+		var p Point
+		if err := rows.Scan(&p.Bucket, &p.Count); err != nil {
 			return nil, err
 		}
-		t, err := time.ParseInLocation("2006-01-02 15:04:05", b, time.UTC)
-		if err != nil {
-			return nil, err
-		}
-		points = append(points, Point{Bucket: t, Count: c})
+		points = append(points, p)
 	}
 	return points, rows.Err()
 }
@@ -266,9 +280,9 @@ func (s *Store) Timeseries(ctx context.Context, site, page string, from, to time
 // ByIP returns per-IP-hash counts between [from, to).
 func (s *Store) ByIP(ctx context.Context, site, page string, from, to time.Time, limit int) ([]IPCount, error) {
 	rows, err := s.db.QueryContext(ctx,
-		"SELECT ip_hash, COUNT(*) FROM view_events "+
-			"WHERE site_key=? AND page_key=? AND ts >= ? AND ts < ? AND ip_hash IS NOT NULL "+
-			"GROUP BY ip_hash ORDER BY 2 DESC LIMIT ?",
+		"SELECT ip_hash, COUNT(*)::bigint FROM view_events "+
+			"WHERE site_key=$1 AND page_key=$2 AND ts >= $3 AND ts < $4 AND ip_hash IS NOT NULL "+
+			"GROUP BY ip_hash ORDER BY 2 DESC LIMIT $5",
 		site, page, from, to, limit)
 	if err != nil {
 		return nil, err
@@ -289,8 +303,8 @@ func (s *Store) ByIP(ctx context.Context, site, page string, from, to time.Time,
 func (s *Store) Events(ctx context.Context, site, page string, from, to time.Time, limit, offset int) ([]EventRow, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT ts, ip_hash, ua, referer FROM view_events "+
-			"WHERE site_key=? AND page_key=? AND ts >= ? AND ts < ? "+
-			"ORDER BY ts DESC LIMIT ? OFFSET ?",
+			"WHERE site_key=$1 AND page_key=$2 AND ts >= $3 AND ts < $4 "+
+			"ORDER BY ts DESC LIMIT $5 OFFSET $6",
 		site, page, from, to, limit, offset)
 	if err != nil {
 		return nil, err
@@ -317,10 +331,12 @@ func (s *Store) ListPages(ctx context.Context, site string, limit, offset int) (
 		args  []any
 	)
 	if site != "" {
-		query = "SELECT site_key, page_key, total_count, updated_at FROM page_counters WHERE site_key=? ORDER BY total_count DESC LIMIT ? OFFSET ?"
+		query = "SELECT site_key, page_key, total_count, updated_at FROM page_counters " +
+			"WHERE site_key=$1 ORDER BY total_count DESC LIMIT $2 OFFSET $3"
 		args = []any{site, limit, offset}
 	} else {
-		query = "SELECT site_key, page_key, total_count, updated_at FROM page_counters ORDER BY total_count DESC LIMIT ? OFFSET ?"
+		query = "SELECT site_key, page_key, total_count, updated_at FROM page_counters " +
+			"ORDER BY total_count DESC LIMIT $1 OFFSET $2"
 		args = []any{limit, offset}
 	}
 	rows, err := s.db.QueryContext(ctx, query, args...)

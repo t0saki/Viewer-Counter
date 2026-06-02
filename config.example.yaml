@@ -25,8 +25,8 @@ server:
   max_body_bytes: 8192
 
 db:
-  # MySQL DSN. parseTime=true and loc=UTC are required.
-  dsn: "viewer:viewerpass@tcp(127.0.0.1:3306)/viewer_counter?parseTime=true&loc=UTC&charset=utf8mb4"
+  # PostgreSQL DSN (libpq URL or key/value form). sslmode as appropriate.
+  dsn: "postgres://viewer:viewerpass@127.0.0.1:5432/viewer_counter?sslmode=disable"
   max_open_conns: 25
   max_idle_conns: 10
   conn_max_lifetime: "5m"
