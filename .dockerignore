@@ -1,0 +1,6 @@
+bin/
+config.yaml
+.git/
+*.log
+.DS_Store
+README.md

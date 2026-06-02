@@ -1,0 +1,39 @@
+services:
+  db:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: viewer_counter
+      MYSQL_USER: viewer
+      MYSQL_PASSWORD: viewerpass
+      MYSQL_ROOT_PASSWORD: rootpass
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-prootpass"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    ports:
+      - "3306:3306"
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      VC_DB_DSN: "viewer:viewerpass@tcp(db:3306)/viewer_counter?parseTime=true&loc=UTC&charset=utf8mb4"
+      VC_SERVER_ADDR: ":8080"
+      VC_IP_SALT: "change-me-to-a-long-random-string"
+      VC_ADMIN_TOKEN: "change-me-admin-token"
+    ports:
+      - "8080:8080"
+    # Mount a real config to override defaults; env vars above cover the
+    # essentials so this works out of the box.
+    volumes:
+      - ./config.example.yaml:/app/config.yaml:ro
+
+volumes:
+  db_data:

@@ -1,0 +1,86 @@
+# Viewer-Counter configuration.
+# Copy to config.yaml and adjust.
+#
+# EVERY field below can also be set via an environment variable named
+# VC_<SECTION>_<FIELD> (e.g. server.read_timeout -> VC_SERVER_READ_TIMEOUT,
+# rate_limit.rps -> VC_RATE_LIMIT_RPS). Env vars override this file, so the file
+# is optional. Slices are comma-separated; durations use Go strings ("30m").
+# See the README for the full table. You can run with no config file at all.
+
+server:
+  addr: ":8080"
+  read_timeout: "10s"
+  write_timeout: "10s"
+  idle_timeout: "60s"
+  # Set true ONLY when behind a reverse proxy AND the app is not directly
+  # reachable from the internet (so clients must go through the proxy).
+  trust_proxy: false
+  # When trust_proxy is true, the client IP is taken from the first non-empty
+  # header in this list — these MUST be set by your proxy, which overwrites any
+  # client-supplied value. Examples: ["X-Real-IP"] (nginx),
+  # ["CF-Connecting-IP", "X-Real-IP"] (Cloudflare in front of nginx),
+  # ["True-Client-IP"] (some CDNs). Fallback is the right-most X-Forwarded-For
+  # entry (the left-most entry is client-spoofable and is never trusted).
+  real_ip_headers: ["X-Real-IP"]
+  max_body_bytes: 8192
+
+db:
+  # MySQL DSN. parseTime=true and loc=UTC are required.
+  dsn: "viewer:viewerpass@tcp(127.0.0.1:3306)/viewer_counter?parseTime=true&loc=UTC&charset=utf8mb4"
+  max_open_conns: 25
+  max_idle_conns: 10
+  conn_max_lifetime: "5m"
+
+privacy:
+  # none = don't store IP; hash = salted SHA256; truncate = /24 (v4) or /48
+  # (v6); full = raw IP. "hash" is GDPR-friendly and the default.
+  ip_mode: "hash"
+  record_ua: true
+  # REQUIRED when ip_mode=hash. Use a long random string; can be set via VC_IP_SALT.
+  salt: "change-me-to-a-long-random-string"
+
+dedup:
+  enabled: true
+  window: "30m"   # same IP+UA on the same page within this window counts once
+
+recent:
+  default: "24h"  # default window for the public /recent endpoint
+  max: "720h"     # clamp ceiling (30d)
+
+cors:
+  # Allowed browser origins for the public endpoints. Use ["*"] to allow all
+  # (development). For production list your sites, e.g.:
+  #   ["https://example.com", "https://blog.example.com"]
+  allowed_origins: ["*"]
+  # When true (and allowed_origins is not "*"), the /hit endpoint rejects
+  # requests whose Origin/Referer is not in the allowlist.
+  enforce_origin: false
+
+rate_limit:
+  enabled: true
+  rps: 5      # sustained requests/sec per client IP
+  burst: 20   # bucket capacity
+
+flush:
+  interval: "1s"  # write-behind flush cadence
+  batch: 500      # also flush when this many pending events accumulate
+
+auth:
+  # Admin bearer tokens for the detailed query API + dashboard.
+  # Can also be supplied via VC_ADMIN_TOKEN. Leave empty to disable admin API.
+  admin_tokens: []
+
+bot:
+  enabled: true
+  keywords: ["bot", "crawl", "spider", "slurp", "facebookexternalhit",
+             "bingpreview", "headlesschrome", "python-requests", "curl/",
+             "wget", "go-http-client"]
+
+events:
+  # Record raw per-view events (enables by-IP / detailed admin queries).
+  # Disable for lighter writes and stronger privacy (totals + hourly buckets
+  # still work).
+  record: true
+
+# Whether the /hit response echoes the current count.
+return_count: true
