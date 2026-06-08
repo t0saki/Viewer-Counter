@@ -54,6 +54,10 @@ func (s *Server) handlePixel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	site, page, ok := s.sitePage(w, r)
 	if !ok {
 		return
@@ -66,6 +70,10 @@ func (s *Server) handleCount(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRecent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	site, page, ok := s.sitePage(w, r)
 	if !ok {
 		return
