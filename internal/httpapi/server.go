@@ -71,8 +71,12 @@ func (s *Server) Handler() http.Handler {
 	// Public endpoints (no auth).
 	mux.Handle("/api/v1/hit", public(s.handleHit)) // GET/POST/OPTIONS
 	mux.Handle("/pixel.gif", public(s.handlePixel))
-	mux.Handle("GET /api/v1/count", public(s.handleCount))
-	mux.Handle("GET /api/v1/recent", public(s.handleRecent))
+	// No method prefix: OPTIONS must reach corsMiddleware so the preflight is
+	// answered with 204 + CORS headers. A "GET ..." pattern makes ServeMux
+	// reject OPTIONS with 405 before the middleware runs. Method is enforced
+	// inside the handlers instead.
+	mux.Handle("/api/v1/count", public(s.handleCount))   // GET/OPTIONS
+	mux.Handle("/api/v1/recent", public(s.handleRecent)) // GET/OPTIONS
 
 	// Admin endpoints (bearer token).
 	mux.Handle("GET /api/v1/admin/pages", admin(s.handlePages))

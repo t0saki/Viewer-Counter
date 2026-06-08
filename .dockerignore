@@ -5,3 +5,4 @@ config.yaml
 *.log
 .DS_Store
 README.md
+.env

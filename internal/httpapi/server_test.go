@@ -139,6 +139,31 @@ func TestOriginEnforcement(t *testing.T) {
 	}
 }
 
+// TestCountPreflight guards the CORS preflight regression: a method-prefixed
+// mux pattern ("GET /api/v1/count") makes ServeMux answer OPTIONS with 405
+// before corsMiddleware runs, breaking cross-origin GETs. The preflight must
+// short-circuit to 204 with the matching Access-Control-Allow-Origin header.
+func TestCountPreflight(t *testing.T) {
+	c := baseConfig()
+	c.CORS.AllowedOrigins = []string{"https://ok.com"}
+	srv, _ := testServer(t, c)
+	h := srv.Handler()
+
+	for _, path := range []string{"/api/v1/count", "/api/v1/recent"} {
+		req := httptest.NewRequest(http.MethodOptions, path+"?site=d&page=/p", nil)
+		req.Header.Set("Origin", "https://ok.com")
+		req.Header.Set("Access-Control-Request-Method", "GET")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusNoContent {
+			t.Fatalf("%s preflight code = %d, want 204", path, rr.Code)
+		}
+		if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://ok.com" {
+			t.Fatalf("%s allow-origin = %q, want https://ok.com", path, got)
+		}
+	}
+}
+
 func TestRateLimit(t *testing.T) {
 	c := baseConfig()
 	c.RateLimit.Enabled = true
